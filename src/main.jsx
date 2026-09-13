@@ -194,6 +194,7 @@ function Login({ onDone }) {
 
 function App() {
   const timerRef = useRef(null);
+  const pipWindowRef = useRef(null);
   const [authed, setAuthed] = useState(null);
   const [user, setUser] = useState(null);
   const [subjects, setSubjects] = useState([]);
@@ -208,6 +209,9 @@ function App() {
   const [err, setErr] = useState('');
   const [lastSync, setLastSync] = useState(null);
   const [fullScreen, setFullScreen] = useState(false);
+  const [pipOpen, setPipOpen] = useState(false);
+  const adjustmentKey = `ypt-web-adjustment:${today()}`;
+  const [adjustmentMs, setAdjustmentMs] = useState(() => Number(localStorage.getItem(`ypt-web-adjustment:${today()}`)) || 0);
 
   async function loadDaySnapshot() {
     const day = await ypt.dayLog(today());
@@ -294,6 +298,73 @@ function App() {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
+  useEffect(() => {
+    const pip = pipWindowRef.current;
+    if (!pip || pip.closed) return;
+    const total = Math.max(0, todayMs + (active ? elapsed : 0) + adjustmentMs);
+    const timeEl = pip.document.getElementById('pip-time');
+    const sessionEl = pip.document.getElementById('pip-session');
+    if (timeEl) timeEl.textContent = fmt(total);
+    if (sessionEl) sessionEl.textContent = `Current session ${fmt(active ? elapsed : 0)}`;
+  }, [todayMs, elapsed, active, adjustmentMs]);
+
+  function saveAdjustment(next) {
+    const safe = Number.isFinite(next) ? Math.round(next) : 0;
+    setAdjustmentMs(safe);
+    if (safe === 0) localStorage.removeItem(adjustmentKey);
+    else localStorage.setItem(adjustmentKey, String(safe));
+  }
+
+  function changeAdjustment(deltaMinutes) {
+    saveAdjustment(adjustmentMs + deltaMinutes * 60 * 1000);
+  }
+
+  function customAdjustment() {
+    const raw = window.prompt('Minutes to add or subtract for today. Examples: 15 or -10');
+    if (raw === null) return;
+    const minutes = Number(raw.trim());
+    if (!Number.isFinite(minutes) || minutes === 0) {
+      setErr('Enter a valid non-zero number of minutes, such as 15 or -10.');
+      return;
+    }
+    setErr('');
+    changeAdjustment(minutes);
+  }
+
+  async function togglePictureInPicture() {
+    try {
+      if (pipWindowRef.current && !pipWindowRef.current.closed) {
+        pipWindowRef.current.close();
+        pipWindowRef.current = null;
+        setPipOpen(false);
+        return;
+      }
+      if (!('documentPictureInPicture' in window)) {
+        setErr('Picture-in-Picture timer needs a Chromium desktop browser that supports Document Picture-in-Picture. Try current Chrome or Edge.');
+        return;
+      }
+      const pip = await window.documentPictureInPicture.requestWindow({ width: 390, height: 225 });
+      pipWindowRef.current = pip;
+      setPipOpen(true);
+      pip.document.title = 'YPT Timer';
+      const style = pip.document.createElement('style');
+      style.textContent = `
+        *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#0d0f10;color:#f5f7f8;font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif}
+        body{display:grid;place-items:center;padding:16px}.pipCard{text-align:center;width:100%}.pipLabel{font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#8b9396}
+        .pipTime{font-size:clamp(44px,15vw,74px);font-weight:800;letter-spacing:-3px;font-variant-numeric:tabular-nums;margin:8px 0 12px}.pipSession{font-size:13px;color:#aeb8b3}
+        .pipDot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#bff36b;margin-right:7px}`;
+      pip.document.head.appendChild(style);
+      pip.document.body.innerHTML = '<div class="pipCard"><div class="pipLabel"><span class="pipDot"></span>Full day study time</div><div class="pipTime" id="pip-time">00:00:00</div><div class="pipSession" id="pip-session">Current session 00:00:00</div></div>';
+      pip.addEventListener('pagehide', () => {
+        pipWindowRef.current = null;
+        setPipOpen(false);
+      }, { once: true });
+      setErr('');
+    } catch (e) {
+      setErr(e.message || 'Could not open Picture-in-Picture timer.');
+    }
+  }
+
   async function startDefault() {
     setErr('');
     const fallbackSubject = subjects[0];
@@ -339,7 +410,7 @@ function App() {
   if (loading && !user) return <div className="center">Loading your YPT account…</div>;
 
   const name = pickName(user);
-  const displayTodayMs = todayMs + (active ? elapsed : 0);
+  const displayTodayMs = Math.max(0, todayMs + (active ? elapsed : 0) + adjustmentMs);
   const currentSessionMs = active ? elapsed : 0;
   const currentSessionCount = daySessions.length;
   const lastSyncText = lastSync ? lastSync.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
@@ -356,6 +427,7 @@ function App() {
           <div className="topActions">
             <button className="actionBtn" onClick={() => hydrate()}><RefreshCw size={16} /> Sync</button>
             <button className="actionBtn" onClick={toggleFullScreen}>{fullScreen ? <Shrink size={16} /> : <Expand size={16} />}{fullScreen ? 'Exit fullscreen' : 'Fullscreen timer'}</button>
+            <button className="actionBtn" onClick={togglePictureInPicture}><Clock3 size={16} /> {pipOpen ? 'Close PiP' : 'PiP timer'}</button>
             <button className="actionBtn" onClick={async () => { await ypt.signOut(); location.reload(); }}><LogOut size={16} /> Sign out</button>
           </div>
         </header>
@@ -372,6 +444,16 @@ function App() {
             <div className="metricLabel">Full day study time</div>
             <div className="bigTime">{fmt(displayTodayMs)}</div>
             <div className="focusSub">{active ? 'Running live on the web timer' : 'Synced from your YPT account'}</div>
+
+            <div className="correctionBar">
+              <span className="correctionLabel">Manual correction {adjustmentMs ? `(${adjustmentMs > 0 ? '+' : ''}${Math.round(adjustmentMs / 60000)} min)` : ''}</span>
+              <div className="correctionButtons">
+                <button onClick={() => changeAdjustment(-5)}>−5 min</button>
+                <button onClick={() => changeAdjustment(5)}>+5 min</button>
+                <button onClick={customAdjustment}>Custom</button>
+                {adjustmentMs !== 0 ? <button onClick={() => saveAdjustment(0)}>Reset</button> : null}
+              </div>
+            </div>
 
             <div className="statRow">
               <div className="miniStat">
@@ -395,8 +477,9 @@ function App() {
                 </button>
               )}
               <button className="secondaryButton" onClick={toggleFullScreen}>{fullScreen ? <Shrink size={18} /> : <Expand size={18} />}{fullScreen ? 'Exit fullscreen' : 'Make full screen'}</button>
+              <button className="secondaryButton" onClick={togglePictureInPicture}><Clock3 size={18} />{pipOpen ? 'Close PiP' : 'Picture in Picture'}</button>
             </div>
-            <p className="tiny note">The start button uses your first available YPT subject in the background so the home screen can stay clean.</p>
+            <p className="tiny note">The start button uses your first available YPT subject in the background. Manual corrections change this web view only and do not rewrite YPT's server-side records.</p>
           </div>
 
           <div className="sideCard">
@@ -434,6 +517,12 @@ function App() {
                   <div className="durationText">{fmt(item.durationMs)}</div>
                 </div>
               )) : <div className="empty">YPT did not return a session-by-session breakdown for today yet.</div>}
+              {adjustmentMs !== 0 ? (
+                <div className="listItem correctionRow">
+                  <div className="itemMeta"><strong>Manual correction</strong><span>Web-only adjustment for today</span></div>
+                  <div className="durationText">{adjustmentMs > 0 ? '+' : '−'}{fmt(Math.abs(adjustmentMs))}</div>
+                </div>
+              ) : null}
             </div>
           </div>
 
